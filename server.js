@@ -42,11 +42,10 @@ app.post('/notify', async (req, res) => {
     const promises = [];
     snap.forEach(child => {
       const data = child.val();
-      if (data.username === autorUsername) return; // no notificar al autor
+      if (data.username === autorUsername) return;
       const sub = data.subscription;
       promises.push(
         webpush.sendNotification(sub, payload).catch(err => {
-          // Si la suscripción ya no es válida, la eliminamos
           if (err.statusCode === 410) {
             db.ref(`push_subscriptions/${data.username}`).remove();
           }
@@ -64,6 +63,33 @@ app.post('/notify', async (req, res) => {
 app.get('/vapid-public-key', (req, res) => {
   res.json({ key: process.env.VAPID_PUBLIC_KEY });
 });
+
+// ── LIMPIEZA AUTOMÁTICA DE EXÁMENES PASADOS ──
+async function cleanOldExams() {
+  try {
+    const snap = await db.ref('exams').once('value');
+    if (!snap.exists()) return;
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const cutoff = yesterday.toISOString().split('T')[0];
+    const deletions = [];
+    snap.forEach(child => {
+      const exam = child.val();
+      if (exam.fecha && exam.fecha < cutoff) {
+        console.log(`Borrando examen pasado: ${exam.titulo} (${exam.fecha})`);
+        deletions.push(db.ref(`exams/${child.key}`).remove());
+      }
+    });
+    await Promise.all(deletions);
+    if (deletions.length > 0) console.log(`${deletions.length} examenes eliminados`);
+  } catch (e) {
+    console.error('Error limpiando examenes:', e.message);
+  }
+}
+
+// Ejecutar al arrancar y cada 24 horas
+cleanOldExams();
+setInterval(cleanOldExams, 24 * 60 * 60 * 1000);
 
 app.get('/', (req, res) => res.json({ status: 'RepasoPro server running ✅' }));
 

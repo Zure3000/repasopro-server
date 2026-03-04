@@ -19,22 +19,36 @@ webpush.setVapidDetails(
   process.env.VAPID_PRIVATE_KEY
 );
 
-// ── GUARDAR SUSCRIPCIÓN DE USUARIO ──
+// ── GUARDAR SUSCRIPCIÓN (una por usuario, con groupCode) ──
 app.post('/subscribe', async (req, res) => {
-  const { username, subscription } = req.body;
+  const { username, subscription, groupCode } = req.body;
   if (!username || !subscription) return res.status(400).json({ error: 'Faltan datos' });
   try {
-    await db.ref(`push_subscriptions/${username}`).set({ subscription, username });
+    await db.ref(`push_subscriptions/${username}`).set({ subscription, username, groupCode: groupCode || '' });
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-// ── ENVIAR NOTIFICACIÓN A TODOS ──
+// Control de notificaciones ya enviadas (evita duplicados)
+const sentNotifications = new Map();
+
+// ── ENVIAR NOTIFICACIÓN (filtrado por grupo, sin duplicados) ──
 app.post('/notify', async (req, res) => {
-  const { title, body, autorUsername } = req.body;
+  const { title, body, autorUsername, groupCode, notifId } = req.body;
   if (!title) return res.status(400).json({ error: 'Falta título' });
+
+  // Si ya procesamos esta notificación exacta, ignorar
+  const key = notifId || (title + autorUsername + groupCode);
+  if (sentNotifications.has(key)) {
+    return res.json({ sent: 0, skipped: true });
+  }
+  sentNotifications.set(key, Date.now());
+  // Limpiar entradas antiguas (más de 1 hora)
+  const hour = 60 * 60 * 1000;
+  sentNotifications.forEach((ts, k) => { if (Date.now() - ts > hour) sentNotifications.delete(k); });
+
   try {
     const snap = await db.ref('push_subscriptions').once('value');
     if (!snap.exists()) return res.json({ sent: 0 });
@@ -42,7 +56,8 @@ app.post('/notify', async (req, res) => {
     const promises = [];
     snap.forEach(child => {
       const data = child.val();
-      if (data.username === autorUsername) return;
+      if (data.username === autorUsername) return; // no notificar al autor
+      if (groupCode && data.groupCode !== groupCode) return; // solo mismo grupo
       const sub = data.subscription;
       promises.push(
         webpush.sendNotification(sub, payload).catch(err => {
@@ -53,6 +68,7 @@ app.post('/notify', async (req, res) => {
       );
     });
     await Promise.all(promises);
+    console.log(`Notificacion enviada: "${title}" → ${promises.length} usuarios`);
     res.json({ sent: promises.length });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -76,7 +92,6 @@ async function cleanOldExams() {
     snap.forEach(child => {
       const exam = child.val();
       if (exam.fecha && exam.fecha < cutoff) {
-        console.log(`Borrando examen pasado: ${exam.titulo} (${exam.fecha})`);
         deletions.push(db.ref(`exams/${child.key}`).remove());
       }
     });
@@ -87,7 +102,6 @@ async function cleanOldExams() {
   }
 }
 
-// Ejecutar al arrancar y cada 24 horas
 cleanOldExams();
 setInterval(cleanOldExams, 24 * 60 * 60 * 1000);
 

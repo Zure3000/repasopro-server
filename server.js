@@ -15,7 +15,7 @@ admin.initializeApp({
 });
 const db = admin.database();
 
-// ── WEB PUSH VAPID KEYS ──
+// ── VAPID ──
 webpush.setVapidDetails(
   'mailto:admin@repasopro.com',
   process.env.VAPID_PUBLIC_KEY,
@@ -24,55 +24,54 @@ webpush.setVapidDetails(
 
 // ── GUARDAR SUSCRIPCIÓN ──
 app.post('/subscribe', async (req, res) => {
-  const { username, subscription, groupCode } = req.body;
+  const { username, subscription, groupCode, curso } = req.body;
   if (!username || !subscription) return res.status(400).json({ error: 'Faltan datos' });
   try {
-    await db.ref(`push_subscriptions/${username}`).set({ subscription, username, groupCode: groupCode || '' });
+    await db.ref(`push_subscriptions/${username}`).set({
+      subscription, username,
+      groupCode: groupCode || '',
+      curso: curso || '',
+      updatedAt: Date.now()
+    });
+    console.log(`[sub] ${username} registrado`);
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-// ── ESCUCHAR FIREBASE Y ENVIAR PUSH AUTOMÁTICAMENTE ──
-let lastProcessedTs = 0;
-
-db.ref('last_push').on('value', async snap => {
-  if (!snap || !snap.exists()) return;
-  const data = snap.val();
-  if (!data || !data.ts) return;
-  if (data.ts <= lastProcessedTs) return;
-  lastProcessedTs = data.ts;
-
-  const { title, body, autor, groupCode } = data;
-  console.log(`Nuevo examen detectado: "${title}" por ${autor} (grupo: ${groupCode})`);
-
+// ── ENVIAR PUSH A UN USUARIO CONCRETO ──
+// La app llama a este endpoint cuando quiere notificar a alguien específico
+app.post('/send-to-user', async (req, res) => {
+  const { username, title, body } = req.body;
+  if (!username || !title) return res.status(400).json({ error: 'Faltan datos' });
   try {
-    const subsSnap = await db.ref('push_subscriptions').once('value');
-    if (!subsSnap.exists()) return;
-    const payload = JSON.stringify({ title: title || '📚 RepasoPro', body: body || 'Nuevo examen publicado' });
-    const promises = [];
-    subsSnap.forEach(child => {
-      const d = child.val();
-      if (d.username === autor) return; // no notificar al autor
-      if (groupCode && d.groupCode !== groupCode) return; // solo mismo grupo
-      promises.push(
-        webpush.sendNotification(d.subscription, payload).catch(err => {
-          if (err.statusCode === 410) db.ref(`push_subscriptions/${d.username}`).remove();
-        })
-      );
+    const snap = await db.ref(`push_subscriptions/${username}`).once('value');
+    if (!snap.exists()) return res.json({ ok: false, reason: 'Sin suscripción' });
+    const d = snap.val();
+    const payload = JSON.stringify({ title, body: body || '' });
+    await webpush.sendNotification(d.subscription, payload).catch(async err => {
+      if (err.statusCode === 410 || err.statusCode === 404) {
+        // Suscripción caducada, borrar
+        await db.ref(`push_subscriptions/${username}`).remove();
+        console.log(`[push] suscripción caducada de ${username}, eliminada`);
+      }
     });
-    await Promise.all(promises);
-    console.log(`✅ Notificacion enviada a ${promises.length} usuarios`);
+    console.log(`[push] enviado a ${username}: ${title}`);
+    res.json({ ok: true });
   } catch (e) {
-    console.error('Error enviando notificacion:', e.message);
+    console.error('[push] error send-to-user:', e.message);
+    res.status(500).json({ error: e.message });
   }
 });
 
-// ── DEVOLVER VAPID PUBLIC KEY ──
+// ── VAPID PUBLIC KEY ──
 app.get('/vapid-public-key', (req, res) => {
   res.json({ key: process.env.VAPID_PUBLIC_KEY });
 });
+
+// ── HEALTH CHECK (para UptimeRobot) ──
+app.get('/', (req, res) => res.json({ status: 'RepasoPro server running ✅', ts: Date.now() }));
 
 // ── LIMPIEZA AUTOMÁTICA DE EXÁMENES PASADOS ──
 async function cleanOldExams() {
@@ -80,7 +79,7 @@ async function cleanOldExams() {
     const snap = await db.ref('exams').once('value');
     if (!snap.exists()) return;
     const yesterday = new Date();
-    yesterday.setDate(yesterday.getDate() - 2);
+    yesterday.setDate(yesterday.getDate() - 1);
     const cutoff = yesterday.toISOString().split('T')[0];
     const deletions = [];
     snap.forEach(child => {
@@ -90,15 +89,13 @@ async function cleanOldExams() {
       }
     });
     await Promise.all(deletions);
-    if (deletions.length > 0) console.log(`${deletions.length} examenes eliminados`);
+    if (deletions.length > 0) console.log(`[clean] ${deletions.length} exámenes eliminados`);
   } catch (e) {
-    console.error('Error limpiando examenes:', e.message);
+    console.error('[clean] error:', e.message);
   }
 }
 cleanOldExams();
 setInterval(cleanOldExams, 24 * 60 * 60 * 1000);
 
-app.get('/', (req, res) => res.json({ status: 'RepasoPro server running ✅' }));
-
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`RepasoPro server en puerto ${PORT}`));

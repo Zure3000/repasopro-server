@@ -22,18 +22,19 @@ webpush.setVapidDetails(
   process.env.VAPID_PRIVATE_KEY
 );
 
-// ── GUARDAR SUSCRIPCIÓN ──
+// ── GUARDAR SUSCRIPCIÓN (guarda también el role) ──
 app.post('/subscribe', async (req, res) => {
-  const { username, subscription, groupCode, curso } = req.body;
+  const { username, subscription, groupCode, curso, role } = req.body;
   if (!username || !subscription) return res.status(400).json({ error: 'Faltan datos' });
   try {
     await db.ref(`push_subscriptions/${username}`).set({
       subscription, username,
       groupCode: groupCode || '',
       curso: curso || '',
+      role: role || 'alumno',
       updatedAt: Date.now()
     });
-    console.log(`[sub] ${username} registrado`);
+    console.log(`[sub] ${username} (${role||'alumno'}) registrado`);
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -41,7 +42,6 @@ app.post('/subscribe', async (req, res) => {
 });
 
 // ── ENVIAR PUSH A UN USUARIO CONCRETO ──
-// La app llama a este endpoint cuando quiere notificar a alguien específico
 app.post('/send-to-user', async (req, res) => {
   const { username, title, body } = req.body;
   if (!username || !title) return res.status(400).json({ error: 'Faltan datos' });
@@ -52,12 +52,11 @@ app.post('/send-to-user', async (req, res) => {
     const payload = JSON.stringify({ title, body: body || '' });
     await webpush.sendNotification(d.subscription, payload).catch(async err => {
       if (err.statusCode === 410 || err.statusCode === 404) {
-        // Suscripción caducada, borrar
         await db.ref(`push_subscriptions/${username}`).remove();
         console.log(`[push] suscripción caducada de ${username}, eliminada`);
       }
     });
-    console.log(`[push] enviado a ${username}: ${title}`);
+    console.log(`[push] enviado a ${username} (${d.role||'?'}): ${title}`);
     res.json({ ok: true });
   } catch (e) {
     console.error('[push] error send-to-user:', e.message);
